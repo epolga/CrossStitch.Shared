@@ -17,6 +17,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 
@@ -152,6 +153,20 @@ public sealed class PinterestUploader
             throw new PinterestApiException(response.StatusCode, $"Pin created but response had no id. Body: {responseBody}");
 
         return pinResponse.id;
+    }
+
+    /// <summary>
+    /// Build the same pin description that <see cref="UploadPinForPatternAsync"/>
+    /// would send, without making any HTTP call. Used by the CSV export
+    /// command so we can hand the user the exact text we'd PATCH onto
+    /// each existing pin if we had pin_edit permission.
+    /// </summary>
+    public string ComposeDescriptionFor(PinPatternInfo pattern)
+    {
+        if (pattern == null) throw new ArgumentNullException(nameof(pattern));
+        var theme = DetectTheme(pattern);
+        var patternUrl = _linkHelper.BuildPatternUrl(pattern);
+        return BuildPinDescription(pattern, theme, pattern.AlbumId, patternUrl);
     }
 
     #region Board mapping (AlbumBoards.csv)
@@ -321,7 +336,7 @@ public sealed class PinterestUploader
         {
             sb.AppendFormat(
                 CultureInfo.InvariantCulture,
-                "Detailed counted cross stitch chart ({0} × {1} stitches, {2} colours). ",
+                "{0} × {1} stitches, {2} colours. ",
                 pattern.Width, pattern.Height, pattern.NColors);
         }
         else
@@ -329,15 +344,11 @@ public sealed class PinterestUploader
             sb.Append("Beautiful counted cross stitch design. ");
         }
 
-        if (!string.IsNullOrWhiteSpace(pattern.Description)) { sb.Append(pattern.Description.Trim()); sb.Append(' '); }
-        if (!string.IsNullOrWhiteSpace(pattern.Notes)) { sb.Append(pattern.Notes.Trim()); sb.Append(' '); }
+        // Small (<100×100) and low-color-count (<10) patterns get a
+        // beginner-friendly hook before the closer.
+        sb.Append(BuildBeginnerHook(pattern) ?? "");
 
-        sb.AppendFormat(
-            CultureInfo.InvariantCulture,
-            "From album {0:D4}. Download printable PDF and see more details at {1}. ",
-            albumId, patternUrl);
-
-        sb.Append("Perfect for embroidery lovers and cross stitch fans. ");
+        sb.Append("Printable PDF chart for embroidery & needlework.");
 
         var hashtags = new List<string>
         {
@@ -359,8 +370,73 @@ public sealed class PinterestUploader
 
         var description = sb.ToString();
         const int maxLength = 500;
-        if (description.Length > maxLength) description = description.Substring(0, maxLength);
+        if (description.Length > maxLength)
+        {
+            // Safety net only — the wording above is sized so the typical
+            // pin lands well under 500. Fall back to a word-boundary cut
+            // so we never chop mid-word or kill the hashtag line.
+            var cut = description.LastIndexOf(' ', maxLength - 1);
+            if (cut < maxLength / 2) cut = maxLength;
+            description = description.Substring(0, cut).TrimEnd();
+        }
         return description;
+    }
+
+    private static readonly Regex BlockLevelTagRegex = new(
+        @"<\s*(br|/p|p|/li|li|/div|div|/tr|tr)\s*/?\s*>",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex AnyTagRegex = new(@"<[^>]+>", RegexOptions.Compiled);
+    private static readonly Regex WhitespaceRunRegex = new(@"\s+", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Strips HTML tags and decodes entities for fields that end up in a
+    /// plain-text Pinterest pin description. Block-level tags (br, p, li, …)
+    /// become spaces so adjacent values don't collide.
+    /// </summary>
+    public static string StripHtmlForPlainText(string? input)
+    {
+        if (string.IsNullOrWhiteSpace(input)) return string.Empty;
+        var t = BlockLevelTagRegex.Replace(input, " ");
+        t = AnyTagRegex.Replace(t, string.Empty);
+        t = WebUtility.HtmlDecode(t);
+        t = WhitespaceRunRegex.Replace(t, " ");
+        return t.Trim();
+    }
+
+    // Phrases pulled at random when the pattern is small (<100×100 stitches).
+    // Mix of explicit examples and variants weaving in the
+    // {beginner, easy, simple, quick stitch, small pattern} vocabulary.
+    private static readonly string[] BeginnerPhrases = new[]
+    {
+        "Perfect for beginners.",
+        "Easy-to-stitch design.",
+        "Suitable for first-time stitchers.",
+        "A simple, quick stitch project.",
+        "Small pattern, easy for beginners.",
+        "Beginner-friendly and easy to stitch.",
+        "A quick stitch — small pattern, simple design.",
+        "Simple and beginner-friendly small pattern.",
+    };
+
+    private static string? BuildBeginnerHook(PinPatternInfo pattern)
+    {
+        var isSmall = pattern.Width > 0 && pattern.Width < 100
+                   && pattern.Height > 0 && pattern.Height < 100;
+        var isLowColor = pattern.NColors > 0 && pattern.NColors < 10;
+
+        if (!isSmall && !isLowColor) return null;
+
+        var sb = new StringBuilder();
+        if (isSmall)
+        {
+            sb.Append(BeginnerPhrases[Random.Shared.Next(BeginnerPhrases.Length)]);
+            sb.Append(' ');
+        }
+        if (isLowColor)
+        {
+            sb.Append("Low color count. ");
+        }
+        return sb.ToString();
     }
 
     private static string ToSentenceCase(string input)
