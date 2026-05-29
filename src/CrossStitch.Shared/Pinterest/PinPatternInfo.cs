@@ -17,4 +17,6 @@ public sealed class PinPatternInfo
     public int Width { get; init; }
     public int Height { get; init; }
     public int NColors { get; init; }
+    /// <summary>Album name used to build the album page URL for A/B testing. Empty = no album link.</summary>
+    public string AlbumCaption { get; init; } = "";
 }

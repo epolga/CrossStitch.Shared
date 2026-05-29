@@ -27,6 +27,9 @@ public static class PlatformConfig
     public static string ResolveAlbumBoardsCsvPath() =>
         ResolvePath("albumBoardsCsvPath");
 
+    public static string ResolvePinAbStatsPath() =>
+        ResolvePath("pinAbStatsPath");
+
     public static string ResolvePath(string key)
     {
         if (string.IsNullOrWhiteSpace(key))

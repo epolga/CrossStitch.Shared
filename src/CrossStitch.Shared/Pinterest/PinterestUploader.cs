@@ -33,6 +33,19 @@ public sealed class PinterestUploaderConfig
 
     /// <summary>Fallback board id used when the album is not in the CSV.</summary>
     public string? DefaultBoardId { get; init; }
+
+    /// <summary>
+    /// Fraction of pins that should link to the album page instead of the
+    /// design page. 0.0 = all design links (off); 0.20 = 20 % album links.
+    /// Only active when <see cref="AbStatsFilePath"/> is also set.
+    /// </summary>
+    public double AlbumLinkRatio { get; init; } = 0.0;
+
+    /// <summary>
+    /// Path to the JSON file that persists design/album pin counts across
+    /// sessions. Required for A/B tracking; null disables A/B routing.
+    /// </summary>
+    public string? AbStatsFilePath { get; init; }
 }
 
 public sealed class PinterestUploader
@@ -43,6 +56,8 @@ public sealed class PinterestUploader
     private readonly string? _defaultBoardId;
     private readonly PatternLinkHelper _linkHelper;
     private readonly PinterestOAuthClient _oauthClient;
+    private readonly PinLinkAbTracker? _abTracker;
+    private readonly double _albumLinkRatio;
 
     // Lazy cache: AlbumID (4-digit string) -> BoardID
     private Dictionary<string, string>? _boardIdByAlbumId;
@@ -60,12 +75,19 @@ public sealed class PinterestUploader
             ? config.BoardsCsvPath
             : PlatformConfig.ResolveAlbumBoardsCsvPath();
         _defaultBoardId = config.DefaultBoardId;
+
+        if (config.AlbumLinkRatio > 0.0 && !string.IsNullOrWhiteSpace(config.AbStatsFilePath))
+        {
+            _abTracker = new PinLinkAbTracker(config.AbStatsFilePath);
+            _albumLinkRatio = config.AlbumLinkRatio;
+        }
     }
 
     /// <summary>
-    /// Create a Pinterest Pin for a design. Returns the created Pin ID.
+    /// Create a Pinterest Pin for a design. Returns the pin ID and which link
+    /// type was used (design page or album page).
     /// </summary>
-    public async Task<string> UploadPinForPatternAsync(
+    public async Task<PinUploadResult> UploadPinForPatternAsync(
         PinPatternInfo pattern,
         bool test = false,
         string? photoFileName = null)
@@ -98,7 +120,10 @@ public sealed class PinterestUploader
             : await GetBoardIdForAlbumAsync(working.AlbumId).ConfigureAwait(false);
 
         // 2. Build URLs.
-        var patternUrl = _linkHelper.BuildPatternUrl(working);
+        var linkType = _abTracker?.Decide(_albumLinkRatio) ?? PinLinkType.Design;
+        var patternUrl = linkType == PinLinkType.Album
+            ? _linkHelper.BuildAlbumUrl(working.AlbumId.ToString("D4"), working.AlbumCaption)
+            : _linkHelper.BuildPatternUrl(working);
         var imageUrl = _linkHelper.BuildImageUrl(working.DesignId, working.AlbumId, photoFileName ?? "4.jpg");
 
         // 3. Analyze theme + build SEO text.
@@ -152,7 +177,8 @@ public sealed class PinterestUploader
         if (pinResponse == null || string.IsNullOrWhiteSpace(pinResponse.id))
             throw new PinterestApiException(response.StatusCode, $"Pin created but response had no id. Body: {responseBody}");
 
-        return pinResponse.id;
+        _abTracker?.Record(linkType);
+        return new PinUploadResult(pinResponse.id, linkType);
     }
 
     /// <summary>
